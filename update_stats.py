@@ -63,6 +63,11 @@ def guess_season() -> int:
 def aggregate_production(csv_text: str):
     agg = {}
     reader = csv.DictReader(io.StringIO(csv_text))
+    def num(row, key):
+        try:
+            return float(row.get(key) or 0)
+        except ValueError:
+            return 0.0
     for row in reader:
         if row.get("season_type") != "REG":
             continue
@@ -72,16 +77,25 @@ def aggregate_production(csv_text: str):
         pid = row.get("player_id")
         if not pid:
             continue
-        try:
-            pts = float(row.get("fantasy_points_ppr") or 0)
-        except ValueError:
-            pts = 0.0
-        d = agg.setdefault(pid, {"pts": 0.0, "games": 0, "name": "", "pos": "", "team": ""})
-        d["pts"] += pts
+        d = agg.setdefault(pid, {
+            "pts": 0.0, "games": 0, "name": "", "pos": "", "team": "",
+            "pass_yds": 0.0, "pass_td": 0.0, "int": 0.0,
+            "rush_yds": 0.0, "rush_td": 0.0,
+            "rec": 0.0, "rec_yds": 0.0, "rec_td": 0.0,
+        })
+        d["pts"] += num(row, "fantasy_points_ppr")
         d["games"] += 1
         d["name"] = row.get("player_display_name", "")
         d["pos"] = pos
         d["team"] = row.get("team", "")
+        d["pass_yds"] += num(row, "passing_yards")
+        d["pass_td"] += num(row, "passing_tds")
+        d["int"] += num(row, "passing_interceptions")
+        d["rush_yds"] += num(row, "rushing_yards")
+        d["rush_td"] += num(row, "rushing_tds")
+        d["rec"] += num(row, "receptions")
+        d["rec_yds"] += num(row, "receiving_yards")
+        d["rec_td"] += num(row, "receiving_tds")
     out = {}
     for pid, d in agg.items():
         if d["games"] == 0:
@@ -89,6 +103,9 @@ def aggregate_production(csv_text: str):
         out[pid] = {
             "n": d["name"], "p": d["pos"], "t": d["team"],
             "pts": round(d["pts"], 1), "gp": d["games"], "ppg": round(d["pts"] / d["games"], 2),
+            "py": round(d["pass_yds"]), "ptd": round(d["pass_td"]), "int": round(d["int"]),
+            "ry": round(d["rush_yds"]), "rtd": round(d["rush_td"]),
+            "rec": round(d["rec"]), "recy": round(d["rec_yds"]), "rectd": round(d["rec_td"]),
         }
     return out
 
@@ -202,6 +219,9 @@ def main():
             entry["pts"] = prod["pts"]
             entry["gp"] = prod["gp"]
             entry["ppg"] = prod["ppg"]
+            for k in ("py", "ptd", "int", "ry", "rtd", "rec", "recy", "rectd"):
+                if prod.get(k):
+                    entry[k] = prod[k]
         if dep:
             entry["dr"] = dep["dr"]
         dc = draft_capital.get((norm_name(name), pos))

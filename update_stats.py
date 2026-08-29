@@ -43,11 +43,15 @@ def fetch_csv_text(url: str):
     req = Request(url, headers={"User-Agent": "sleeper-stats-updater/1.0"})
     try:
         with urlopen(req, timeout=60) as resp:
-            if resp.status != 200:
+            status = getattr(resp, "status", 200)
+            if status != 200:
+                print(f"  non-200 status ({status}) for {url}", file=sys.stderr, flush=True)
                 return None
-            return resp.read().decode("utf-8")
+            data = resp.read().decode("utf-8")
+            print(f"  fetched {url} ({len(data)} bytes)", flush=True)
+            return data
     except Exception as e:
-        print(f"  fetch failed for {url}: {e}", file=sys.stderr)
+        print(f"  fetch failed for {url}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return None
 
 
@@ -159,15 +163,75 @@ def load_depth_chart(csv_text):
 def main():
     season = guess_season()
 
-    print(f"Fetching production stats for season {season}...")
+    print(f"Fetching production stats for season {season}...", flush=True)
     prod_csv = fetch_csv_text(STATS_URL.format(season=season))
     used_season = season
     if not prod_csv:
-        print(f"No production data for {season} yet, falling back to {season - 1}...")
+        print(f"No production data for {season} yet, falling back to {season - 1}...", flush=True)
         prod_csv = fetch_csv_text(STATS_URL.format(season=season - 1))
         used_season = season - 1
 
     production = aggregate_production(prod_csv) if prod_csv else {}
+    print(f"  parsed production for {len(production)} players", flush=True)
 
-    print("Fetching draft capital...")
+    print("Fetching draft capital...", flush=True)
     draft_csv = fetch_csv_text(DRAFT_PICKS_URL)
+    draft_capital = load_draft_capital(draft_csv)
+    print(f"  parsed draft capital for {len(draft_capital)} name/position keys", flush=True)
+
+    print(f"Fetching depth chart for season {season}...", flush=True)
+    depth_csv = fetch_csv_text(DEPTH_CHART_URL.format(season=season))
+    if not depth_csv:
+        print(f"No depth chart for {season} yet, falling back to {season - 1}...", flush=True)
+        depth_csv = fetch_csv_text(DEPTH_CHART_URL.format(season=season - 1))
+    depth_chart = load_depth_chart(depth_csv)
+    print(f"  parsed depth chart for {len(depth_chart)} players", flush=True)
+
+    all_ids = set(production) | set(depth_chart)
+    merged = {}
+    for pid in all_ids:
+        prod = production.get(pid, {})
+        dep = depth_chart.get(pid, {})
+        name = prod.get("n") or dep.get("n") or ""
+        pos = prod.get("p") or dep.get("p") or ""
+        team = prod.get("t") or dep.get("t") or ""
+        if not name or not pos:
+            continue
+        entry = {"n": name, "p": pos, "t": team}
+        if prod:
+            entry["pts"] = prod["pts"]
+            entry["gp"] = prod["gp"]
+            entry["ppg"] = prod["ppg"]
+        if dep:
+            entry["dr"] = dep["dr"]
+        dc = draft_capital.get((norm_name(name), pos))
+        if dc:
+            entry["dc"] = {"rd": dc["rd"], "pk": dc["pk"], "yr": dc["yr"]}
+        merged[pid] = entry
+
+    payload = {
+        "season": used_season,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "players": merged,
+    }
+
+    with open("stats.json", "w") as f:
+        json.dump(payload, f, separators=(",", ":"))
+
+    with_prod = sum(1 for p in merged.values() if "ppg" in p)
+    with_draft = sum(1 for p in merged.values() if "dc" in p)
+    with_depth = sum(1 for p in merged.values() if "dr" in p)
+    print(f"Wrote stats.json — season {used_season}, {len(merged)} players total "
+          f"({with_prod} with production, {with_draft} with draft capital, {with_depth} with depth chart).",
+          flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        import traceback
+        print("FATAL ERROR in update_stats.py:", file=sys.stderr, flush=True)
+        traceback.print_exc()
+        sys.stderr.flush()
+        sys.exit(1)

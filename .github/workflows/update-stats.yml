@@ -1,0 +1,37 @@
+name: Update fantasy stats
+
+on:
+  schedule:
+    # Runs at 09:00 and 21:00 UTC every day (~3am/3pm Chicago during CDT).
+    # Cheap to run more often if you want it tighter — nflverse itself
+    # typically updates a few hours after Tue/Wed/Thu/Sun-Mon games wrap.
+    - cron: "0 9,21 * * *"
+  workflow_dispatch: {}   # lets you trigger a manual refresh from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Refresh stats.json
+        run: python update_stats.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name "stats-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- stats.json; then
+            git add stats.json
+            git commit -m "Auto-update stats.json [skip ci]"
+            git push
+          else
+            echo "No changes, skipping commit."
+          fi

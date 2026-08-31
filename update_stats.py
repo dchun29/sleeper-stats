@@ -82,6 +82,9 @@ def aggregate_production(csv_text: str):
             "pass_yds": 0.0, "pass_td": 0.0, "int": 0.0,
             "rush_yds": 0.0, "rush_td": 0.0,
             "rec": 0.0, "rec_yds": 0.0, "rec_td": 0.0,
+            "completions": 0.0, "attempts": 0.0, "cpoe_weighted_sum": 0.0,
+            "targets": 0.0, "target_share_sum": 0.0, "target_share_weeks": 0,
+            "air_yards_share_sum": 0.0,
         })
         d["pts"] += num(row, "fantasy_points_ppr")
         d["games"] += 1
@@ -96,17 +99,39 @@ def aggregate_production(csv_text: str):
         d["rec"] += num(row, "receptions")
         d["rec_yds"] += num(row, "receiving_yards")
         d["rec_td"] += num(row, "receiving_tds")
+        # QB accuracy: completions/attempts for real completion %, plus
+        # attempt-weighted CPOE (Completion % Over Expected) — the real
+        # analytics-standard "accuracy" metric, adjusted for throw difficulty.
+        att = num(row, "attempts")
+        d["completions"] += num(row, "completions")
+        d["attempts"] += att
+        d["cpoe_weighted_sum"] += num(row, "passing_cpoe") * att
+        # Opportunity/target share: the real, measurable version of "chemistry" —
+        # how much of the team's passing volume actually goes to this player.
+        if num(row, "targets") > 0 or row.get("targets") == "0":
+            d["targets"] += num(row, "targets")
+            d["target_share_sum"] += num(row, "target_share")
+            d["air_yards_share_sum"] += num(row, "air_yards_share")
+            d["target_share_weeks"] += 1
     out = {}
     for pid, d in agg.items():
         if d["games"] == 0:
             continue
-        out[pid] = {
+        entry = {
             "n": d["name"], "p": d["pos"], "t": d["team"],
             "pts": round(d["pts"], 1), "gp": d["games"], "ppg": round(d["pts"] / d["games"], 2),
             "py": round(d["pass_yds"]), "ptd": round(d["pass_td"]), "int": round(d["int"]),
             "ry": round(d["rush_yds"]), "rtd": round(d["rush_td"]),
             "rec": round(d["rec"]), "recy": round(d["rec_yds"]), "rectd": round(d["rec_td"]),
         }
+        if d["attempts"] > 0:
+            entry["cp"] = round(100 * d["completions"] / d["attempts"], 1)
+            entry["cpoe"] = round(d["cpoe_weighted_sum"] / d["attempts"], 1)
+        if d["target_share_weeks"] > 0:
+            entry["tgt"] = round(d["targets"])
+            entry["tgtshare"] = round(100 * d["target_share_sum"] / d["target_share_weeks"], 1)
+            entry["ayshare"] = round(100 * d["air_yards_share_sum"] / d["target_share_weeks"], 1)
+        out[pid] = entry
     return out
 
 
@@ -219,7 +244,8 @@ def main():
             entry["pts"] = prod["pts"]
             entry["gp"] = prod["gp"]
             entry["ppg"] = prod["ppg"]
-            for k in ("py", "ptd", "int", "ry", "rtd", "rec", "recy", "rectd"):
+            for k in ("py", "ptd", "int", "ry", "rtd", "rec", "recy", "rectd",
+                      "cp", "cpoe", "tgt", "tgtshare", "ayshare"):
                 if prod.get(k):
                     entry[k] = prod[k]
         if dep:

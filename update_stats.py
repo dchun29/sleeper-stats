@@ -24,6 +24,7 @@ from urllib.request import urlopen, Request
 STATS_URL = "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{season}.csv"
 DRAFT_PICKS_URL = "https://github.com/nflverse/nflverse-data/releases/download/draft_picks/draft_picks.csv"
 DEPTH_CHART_URL = "https://github.com/nflverse/nflverse-data/releases/download/depth_charts/depth_charts_{season}.csv"
+SCHEDULE_URL = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
 
 FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K"}
 DEPTH_POS_MAP = {"QB": "QB", "RB": "RB", "WR": "WR", "TE": "TE", "PK": "K"}  # depth chart uses "PK" for kicker
@@ -202,6 +203,78 @@ def load_depth_chart(csv_text):
     return out
 
 
+def compute_points_allowed_by_position(csv_text):
+    """team -> {position -> total PPR points allowed to that position last season}.
+    Proxy for defensive difficulty by position, since we can't know how a
+    defense will perform before the season it's being used to project."""
+    allowed = {}
+    if not csv_text:
+        return allowed
+    reader = csv.DictReader(io.StringIO(csv_text))
+    for row in reader:
+        if row.get("season_type") != "REG":
+            continue
+        pos = row.get("position")
+        if pos not in ("QB", "RB", "WR", "TE"):
+            continue
+        opp = row.get("opponent_team")
+        if not opp:
+            continue
+        try:
+            pts = float(row.get("fantasy_points_ppr") or 0)
+        except ValueError:
+            pts = 0.0
+        allowed.setdefault(opp, {}).setdefault(pos, 0.0)
+        allowed[opp][pos] += pts
+    return allowed
+
+
+def compute_schedule_opponents(csv_text, season):
+    """team -> list of opponent teams for the given season (full season,
+    used as a season-long schedule-strength signal — not a single-week
+    matchup call, which the app's Lineup Optimizer handles separately)."""
+    opponents = {}
+    if not csv_text:
+        return opponents
+    reader = csv.DictReader(io.StringIO(csv_text))
+    for row in reader:
+        if row.get("season") != str(season):
+            continue
+        home, away = row.get("home_team"), row.get("away_team")
+        if not home or not away:
+            continue
+        opponents.setdefault(home, []).append(away)
+        opponents.setdefault(away, []).append(home)
+    return opponents
+
+
+def compute_sos(points_allowed, opponents):
+    """team -> {position -> 0-100 ease score, 100 = easiest schedule}.
+    Averages how much each of a team's opponents allowed to that position
+    last season, then converts to a percentile rank across all 32 teams so
+    the scale stays consistent regardless of scoring format or league size."""
+    raw = {}
+    for team, opp_list in opponents.items():
+        raw[team] = {}
+        for pos in ("QB", "RB", "WR", "TE"):
+            vals = [points_allowed.get(opp, {}).get(pos) for opp in opp_list]
+            vals = [v for v in vals if v is not None]
+            if vals:
+                raw[team][pos] = sum(vals) / len(vals)
+    sos = {team: {} for team in raw}
+    for pos in ("QB", "RB", "WR", "TE"):
+        ranked = sorted(
+            [(team, vals[pos]) for team, vals in raw.items() if pos in vals],
+            key=lambda x: x[1]
+        )
+        n = len(ranked)
+        if n < 2:
+            continue
+        for i, (team, _) in enumerate(ranked):
+            sos[team][pos] = round(100 * i / (n - 1), 1)  # 0=toughest, 100=easiest
+    return sos
+
+
 def main():
     season = guess_season()
 
@@ -229,6 +302,16 @@ def main():
     depth_chart = load_depth_chart(depth_csv)
     print(f"  parsed depth chart for {len(depth_chart)} players", flush=True)
 
+    # Strength of schedule: last season's defense-vs-position performance
+    # (the only performance data that actually exists) applied to this
+    # season's actual matchups, as a season-long — not single-week — signal.
+    print("Computing strength of schedule...", flush=True)
+    points_allowed = compute_points_allowed_by_position(prod_csv)
+    sched_csv = fetch_csv_text(SCHEDULE_URL)
+    opponents = compute_schedule_opponents(sched_csv, season) if sched_csv else {}
+    sos = compute_sos(points_allowed, opponents)
+    print(f"  computed SOS for {len(sos)} teams", flush=True)
+
     all_ids = set(production) | set(depth_chart)
     merged = {}
     for pid in all_ids:
@@ -253,6 +336,8 @@ def main():
         dc = draft_capital.get((norm_name(name), pos))
         if dc:
             entry["dc"] = {"rd": dc["rd"], "pk": dc["pk"], "yr": dc["yr"]}
+        if team and pos in ("QB", "RB", "WR", "TE") and sos.get(team, {}).get(pos) is not None:
+            entry["sos"] = sos[team][pos]
         merged[pid] = entry
 
     payload = {
@@ -267,8 +352,10 @@ def main():
     with_prod = sum(1 for p in merged.values() if "ppg" in p)
     with_draft = sum(1 for p in merged.values() if "dc" in p)
     with_depth = sum(1 for p in merged.values() if "dr" in p)
+    with_sos = sum(1 for p in merged.values() if "sos" in p)
     print(f"Wrote stats.json — season {used_season}, {len(merged)} players total "
-          f"({with_prod} with production, {with_draft} with draft capital, {with_depth} with depth chart).",
+          f"({with_prod} with production, {with_draft} with draft capital, {with_depth} with depth chart, "
+          f"{with_sos} with schedule strength).",
           flush=True)
 
 
